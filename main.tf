@@ -3,9 +3,9 @@ provider "aws" {
   region = "eu-west-1"
 }
 
-// Subnet Configuration
+// VPC and Subnet Configuration
 resource "aws_subnet" "default_subnet" {
-  vpc_id                  = "vpc-0f7a985c4a51dd38f"
+  vpc_id                  = "vpc-0f7a985c4a51dd38f" 
   cidr_block              = "172.31.1.0/24"
   map_public_ip_on_launch = true
   availability_zone       = "eu-west-1a"
@@ -21,27 +21,52 @@ resource "tls_private_key" "keypair" {
   rsa_bits  = 4096
 }
 
-// Save Private Key Locally
+// Create Private Key File
 resource "local_file" "private_key" {
   content         = tls_private_key.keypair.private_key_pem
-  filename        = "kube-key.pem"
+  filename        = "prom-key.pem"
   file_permission = "600"
 }
 
-// AWS Key Pair
+// EC2 KeyPair
 resource "aws_key_pair" "keypair" {
-  key_name   = "kube-key"
+  key_name   = "pros-keypair"
   public_key = tls_private_key.keypair.public_key_openssh
 }
 
-// Security Group for Cluster
-resource "aws_security_group" "kube_sg" {
-  name        = "kube-cluster-sg"
-  description = "Allow inbound traffic for Kubernetes Cluster"
+// Security Group for Prometheus and Grafana
+resource "aws_security_group" "ec2_sg" {
+  name        = "prom_graf_sg"
+  description = "Allow inbound traffic for Prometheus and Grafana"
 
   ingress {
-    from_port   = 0
-    to_port     = 65535
+    description = "SSH access"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Prometheus"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Node Exporter Port"
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Grafana"
+    from_port   = 3000
+    to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -54,45 +79,47 @@ resource "aws_security_group" "kube_sg" {
   }
 
   tags = {
-    Name = "kube-cluster-sg"
+    Name = "ec2-sg"
   }
 }
 
-// EC2 Instance: Master Node
-resource "aws_instance" "master" {
-  ami                    = "ami-0d64bb532e0502c46"
+// EC2 Instance for Prometheus and Grafana
+resource "aws_instance" "prom_graf" {
+  ami                    = "ami-0d64bb532e0502c46" // Ubuntu AMI
   instance_type          = "t2.medium"
-  vpc_security_group_ids = [aws_security_group.kube_sg.id]
-  subnet_id              = aws_subnet.default_subnet.id
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
   key_name               = aws_key_pair.keypair.key_name
   associate_public_ip_address = true
-  user_data              = file("./master-userdata.sh")
+  subnet_id              = aws_subnet.default_subnet.id
+  user_data              = templatefile("prom-graf-userdata.sh", {
+    ec2_webserver_ip = aws_instance.ec2_server.public_ip
+  })
 
   tags = {
-    Name = "master-node"
+    Name = "prom-graf-server"
   }
 }
 
-// EC2 Instances: Worker Nodes
-resource "aws_instance" "worker" {
-  count                  = 2
-  ami                    = "ami-0d64bb532e0502c46"
-  instance_type          = "t2.medium"
-  vpc_security_group_ids = [aws_security_group.kube_sg.id]
-  subnet_id              = aws_subnet.default_subnet.id
+// EC2 Instance for General Web Server
+resource "aws_instance" "ec2_server" {
+  ami                    = "ami-0d64bb532e0502c46" // Ubuntu AMI
+  instance_type          = "t2.micro"
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
   key_name               = aws_key_pair.keypair.key_name
   associate_public_ip_address = true
-  user_data              = file("./worker-userdata.sh")
+  subnet_id              = aws_subnet.default_subnet.id
+  user_data              = file("./ec2-server-userdata.sh")
 
   tags = {
-    Name = "worker-node-${count.index}"
+    Name = "ec2-server"
   }
 }
 
 // Outputs
-output "master" {
-  value = aws_instance.master.public_ip
+output "prom_graf_ip" {
+  value = aws_instance.prom_graf.public_ip
 }
-output "worker_nodes" {
-  value = aws_instance.worker.*.public_ip
+
+output "ec2_ip" {
+  value = aws_instance.ec2_server.public_ip
 }
